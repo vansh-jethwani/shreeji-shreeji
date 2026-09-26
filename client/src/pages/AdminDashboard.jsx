@@ -1268,6 +1268,15 @@ function OrdersTab() {
           <Typography variant="subtitle1" fontWeight={600} gutterBottom>
             Payment verification
           </Typography>
+          {selected?.upiTransactionReference && (
+            <Alert severity="info" sx={{ mb: 2 }}>
+              Customer&apos;s UPI reference (UTR):{' '}
+              <strong style={{ letterSpacing: 1 }}>{selected.upiTransactionReference}</strong>
+              <Typography variant="caption" display="block" sx={{ mt: 0.5 }}>
+                Match this against your UPI app / bank statement before marking paid.
+              </Typography>
+            </Alert>
+          )}
           <Typography variant="body2" color="text.secondary" paragraph>
             Verify the payment in your UPI app / bank statement first. Marking it paid confirms the
             order; only do this after you have actually received the money.

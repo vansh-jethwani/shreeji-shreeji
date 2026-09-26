@@ -20,11 +20,10 @@ import {
   TextField,
   Typography
 } from '@mui/material'
-import QRCode from 'react-qr-code'
 import { useApi } from '../lib/api.js'
 import { useCart } from '../context/CartContext.jsx'
-import { formatINR, openUpiIntent, copyText } from '../utils/upi.js'
-import { isMobileOrTablet } from '../utils/device.js'
+import { buildUpiIntent, copyText, formatINR } from '../utils/upi.js'
+import QRCode from 'react-qr-code'
 import {
   loadGoogleMaps,
   createPredictionFetcher,
@@ -258,10 +257,18 @@ export default function Checkout() {
 
   const [placing, setPlacing] = useState(false)
   const [placeError, setPlaceError] = useState('')
-  const [payment, setPayment] = useState(null) // { orderId, orderNumber, total, upiUri, merchantUpiId, merchantName, transactionReference }
+  const [payment, setPayment] = useState(null) // { orderId, orderNumber, total, merchantName }
 
-  const [notifying, setNotifying] = useState(false)
-  const [notifyError, setNotifyError] = useState('')
+  // Manual-UPI pay flow: the customer pays in their own UPI app, then submits
+  // the 12-digit UTR. Nothing here marks anything paid — the backend only
+  // records the reference; the admin verifies manually.
+  const [payState, setPayState] = useState('idle') // idle | submitting
+  const [payError, setPayError] = useState('')
+  const [upiCfg, setUpiCfg] = useState(null)
+  const [upiLoading, setUpiLoading] = useState(false)
+  const [upiError, setUpiError] = useState('')
+  const [utr, setUtr] = useState('')
+  const [utrError, setUtrError] = useState('')
   const [copied, setCopied] = useState(false)
 
   const hamper = hampers[0] || null
@@ -321,8 +328,9 @@ export default function Checkout() {
     setPlacing(true)
     setPlaceError('')
     try {
-      // New order contract: the backend is the sole source of truth for the
-      // total — it prices from the hamper type, so no amount is sent.
+      // The backend is the sole source of truth for the total — it prices
+      // from the hamper type, so no amount is sent. Payment is manual UPI:
+      // the next step shows the merchant UPI ID + exact-amount QR.
       const res = await api.post('/orders', {
         hamperTypeId: orderPayload.hamperTypeId,
         selections: orderPayload.selections,
@@ -330,15 +338,11 @@ export default function Checkout() {
         addressId: String(selectedAddress._id)
       })
       const d = res.data || {}
-      const upi = d.upi || {}
       setPayment({
         orderId: d.orderId || d.order?._id,
         orderNumber: d.orderNumber || d.order?.orderNumber,
-        total: d.total ?? upi.amount,
-        upiUri: d.upiUri || upi.uri,
-        merchantUpiId: d.merchantUpiId || upi.merchantUpiId,
-        merchantName: d.merchantName || upi.merchantName || 'Shreeji & Shreeji',
-        transactionReference: d.transactionReference || upi.transactionReference
+        total: d.total ?? total,
+        merchantName: d.merchantName || 'Shreeji & Shreeji'
       })
     } catch (e) {
       setPlaceError(e.response?.data?.error || 'Could not place your order. Please try again.')
@@ -347,30 +351,73 @@ export default function Checkout() {
     }
   }
 
-  const confirmPaid = async () => {
-    if (!payment?.orderNumber) return
-    setNotifying(true)
-    setNotifyError('')
+  /** Load the merchant UPI details once the payment step is shown. */
+  useEffect(() => {
+    if (!payment) return undefined
+    let alive = true
+    setUpiLoading(true)
+    api
+      .get('/payment/upi/config')
+      .then((res) => {
+        if (alive) {
+          setUpiCfg(res.data || null)
+          setUpiError('')
+        }
+      })
+      .catch(() => {
+        if (alive) setUpiError('Could not load payment details. Please refresh and try again.')
+      })
+      .finally(() => {
+        if (alive) setUpiLoading(false)
+      })
+    return () => {
+      alive = false
+    }
+  }, [api, payment])
+
+  /** Exact-amount UPI intent built from server values only. */
+  const upiUri = useMemo(() => {
+    if (!upiCfg?.upiId || !payment) return ''
+    return buildUpiIntent({
+      merchantUpiId: upiCfg.upiId,
+      merchantName: upiCfg.merchantName,
+      amount: payment.total,
+      transactionRef: payment.orderNumber,
+      note: `Shreeji & Shreeji order ${payment.orderNumber}`
+    })
+  }, [upiCfg, payment])
+
+  const copyUpiId = async () => {
+    if (!upiCfg?.upiId) return
+    const ok = await copyText(upiCfg.upiId)
+    setCopied(ok)
+    if (ok) setTimeout(() => setCopied(false), 2000)
+  }
+
+  /** Submit the 12-digit UTR after paying manually. Never marks anything
+   * paid — the backend only records the reference for admin verification. */
+  const submitUtr = async () => {
+    const ref = utr.replace(/[\s-]+/g, '')
+    if (!/^\d{12}$/.test(ref)) {
+      setUtrError('Enter the 12-digit UTR / UPI reference number shown in your payment app.')
+      return
+    }
+    if (!payment?.orderNumber || payState !== 'idle') return
+    setUtrError('')
+    setPayState('submitting')
+    setPayError('')
     try {
-      await api.post('/payment/upi/confirm-paid-notification', { orderNumber: payment.orderNumber })
+      await api.post('/payment/upi/submit-reference', {
+        orderNumber: payment.orderNumber,
+        upiRef: ref
+      })
       clearCart()
       navigate(`/order-success/${payment.orderId}`)
     } catch (e) {
-      setNotifyError(
-        e.response?.data?.error ||
-          'We could not record your confirmation. If you paid, please contact us — do not pay again.'
+      setPayState('idle')
+      setPayError(
+        e.response?.data?.error || 'Could not submit your payment reference. Please try again.'
       )
-    } finally {
-      setNotifying(false)
-    }
-  }
-
-  const handleCopyUpiId = async () => {
-    if (!payment?.merchantUpiId) return
-    const ok = await copyText(payment.merchantUpiId)
-    if (ok) {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
     }
   }
 
@@ -389,8 +436,6 @@ export default function Checkout() {
       </Container>
     )
   }
-
-  const mobile = isMobileOrTablet()
 
   return (
     <Container maxWidth="md" sx={{ py: { xs: 3, sm: 5 } }}>
@@ -523,8 +568,8 @@ export default function Checkout() {
             Delivering to: {addressLines(selectedAddress)}
           </Typography>
           <Alert severity="info" sx={{ mb: 2 }}>
-            We accept UPI payments only. Your payment is verified manually by our team — your order
-            stays “Pending Verification” until we confirm it.
+            Pay via UPI to our UPI ID — scan the QR or pay in your UPI app, then share the
+            12-digit UTR reference. We verify every payment manually before confirming your order.
           </Alert>
 
           {placeError && (
@@ -550,70 +595,136 @@ export default function Checkout() {
       )}
 
       {activeStep === 1 && payment && (
-        <Box sx={{ textAlign: 'center' }}>
-          <Typography variant="h6" gutterBottom>
-            Pay {formatINR(payment.total)} via UPI
+        <Box sx={{ maxWidth: 560, mx: 'auto' }}>
+          <Typography variant="h6" gutterBottom sx={{ textAlign: 'center' }}>
+            Pay via UPI
           </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-            Order {payment.orderNumber ? `#${payment.orderNumber}` : ''} · please use this exact amount.
-          </Typography>
-
-          {mobile ? (
-            <Button
-              variant="contained"
-              size="large"
-              fullWidth
-              sx={{ py: 2, fontSize: '1.1rem', mb: 2 }}
-              onClick={() => openUpiIntent(payment.upiUri)}
-            >
-              Pay {formatINR(payment.total)} via UPI
-            </Button>
-          ) : (
-            <Card variant="outlined" sx={{ maxWidth: 360, mx: 'auto', mb: 2 }}>
-              <CardContent>
-                {payment.upiUri ? (
-                  <QRCode value={payment.upiUri} size={220} style={{ width: '100%', height: 'auto' }} />
-                ) : (
-                  <Alert severity="warning">Payment link unavailable. Please contact us.</Alert>
-                )}
-                <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-                  Scan with any UPI app (GPay, PhonePe, Paytm, BHIM)
+          <Card variant="outlined" sx={{ mb: 2 }}>
+            <CardContent>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
+                <Typography variant="body2" color="text.secondary">
+                  Order
                 </Typography>
-                {payment.merchantUpiId && (
-                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1, mt: 1.5 }}>
-                    <Typography variant="body2" fontWeight={600}>
-                      {payment.merchantUpiId}
+                <Typography variant="body2" fontWeight={600}>
+                  #{payment.orderNumber}
+                </Typography>
+              </Box>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
+                <Typography variant="body2" color="text.secondary">
+                  Merchant
+                </Typography>
+                <Typography variant="body2" fontWeight={600}>
+                  {upiCfg?.merchantName || payment.merchantName}
+                </Typography>
+              </Box>
+              <Divider sx={{ my: 1.5 }} />
+              <Box
+                sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
+              >
+                <Typography variant="subtitle1" fontWeight={700}>
+                  Amount payable
+                </Typography>
+                <Typography variant="h5" fontWeight={800}>
+                  {formatINR(payment.total)}
+                </Typography>
+              </Box>
+              <Typography variant="caption" color="text.secondary">
+                Exact amount — it cannot be edited.
+              </Typography>
+            </CardContent>
+          </Card>
+
+          {upiLoading ? (
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 2, py: 4 }}>
+              <CircularProgress size={24} /> <Typography>Loading payment details…</Typography>
+            </Box>
+          ) : upiError ? (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {upiError}
+            </Alert>
+          ) : (
+            upiCfg && (
+              <Box>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                  <strong>Step 1.</strong> Pay {formatINR(payment.total)} to our UPI ID — scan the QR
+                  or use your UPI app (GPay, PhonePe, Paytm, BHIM).
+                  <br />
+                  <strong>Step 2.</strong> Enter the 12-digit UTR / UPI reference number from your
+                  payment app below. We verify every payment manually and confirm your order.
+                </Typography>
+
+                <Paper
+                  variant="outlined"
+                  sx={{ p: 3, mb: 2, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1.5 }}
+                >
+                  <Box sx={{ bgcolor: '#fff', p: 1.5, borderRadius: 1 }}>
+                    <QRCode value={upiUri} size={200} />
+                  </Box>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap', justifyContent: 'center' }}>
+                    <Typography variant="body1" fontWeight={600} sx={{ letterSpacing: 0.5 }}>
+                      {upiCfg.upiId}
                     </Typography>
-                    <Button size="small" variant="outlined" onClick={handleCopyUpiId}>
-                      {copied ? 'Copied' : 'Copy'}
+                    <Button size="small" variant="outlined" onClick={copyUpiId}>
+                      {copied ? 'Copied!' : 'Copy'}
                     </Button>
                   </Box>
+                  <Button
+                    component="a"
+                    href={upiUri}
+                    variant="text"
+                    size="small"
+                    sx={{ textTransform: 'none' }}
+                  >
+                    Open in UPI app
+                  </Button>
+                </Paper>
+
+                <TextField
+                  fullWidth
+                  label="UTR / UPI reference number (12 digits)"
+                  value={utr}
+                  onChange={(e) => setUtr(e.target.value.replace(/[^\d]/g, '').slice(0, 12))}
+                  error={Boolean(utrError)}
+                  helperText={utrError || 'Found in your payment app under transaction details.'}
+                  inputProps={{ inputMode: 'numeric', maxLength: 12 }}
+                  sx={{ mb: 2 }}
+                />
+
+                {payError && (
+                  <Alert severity="error" sx={{ mb: 2 }}>
+                    {payError}
+                  </Alert>
                 )}
-              </CardContent>
-            </Card>
+
+                <Button
+                  variant="contained"
+                  size="large"
+                  fullWidth
+                  onClick={submitUtr}
+                  disabled={payState !== 'idle' || utr.replace(/[^\d]/g, '').length !== 12}
+                  sx={{ py: 1.5, fontSize: '1.02rem' }}
+                >
+                  {payState === 'submitting' ? (
+                    <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                      <CircularProgress size={24} color="inherit" sx={{ mr: 1 }} />
+                      Submitting…
+                    </Box>
+                  ) : (
+                    "I've Paid — Submit for Verification"
+                  )}
+                </Button>
+
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: 'block', mt: 1.5, textAlign: 'center' }}
+                >
+                  Submitting the reference does not charge anything — it only tells us to verify
+                  your payment. Your order is confirmed after we receive the money.
+                </Typography>
+              </Box>
+            )
           )}
-
-          <Alert severity="info" sx={{ mb: 2, textAlign: 'left' }}>
-            After paying, tap the button below. Payments are verified manually by our team — your
-            order stays “Pending Verification” until we confirm it. Please do not pay twice.
-          </Alert>
-
-          {notifyError && (
-            <Alert severity="error" sx={{ mb: 2 }}>
-              {notifyError}
-            </Alert>
-          )}
-
-          <Button
-            variant="contained"
-            size="large"
-            fullWidth
-            onClick={confirmPaid}
-            disabled={notifying}
-            sx={{ py: 1.5 }}
-          >
-            {notifying ? <CircularProgress size={24} color="inherit" /> : 'I Have Completed Payment'}
-          </Button>
         </Box>
       )}
     </Container>
