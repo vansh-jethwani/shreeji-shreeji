@@ -164,7 +164,32 @@ async function seedDefaultHamperTypes() {
 const app = express();
 
 // ---------- Security headers ----------
-app.use(helmet());
+// Content-Security-Policy explicitly allows the third-party scripts this app
+// needs: Razorpay checkout (payments), Google Maps (address autocomplete),
+// Google Fonts. Everything else stays locked to 'self'.
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+        'script-src': [
+          "'self'",
+          'https://checkout.razorpay.com',
+          'https://maps.googleapis.com',
+          'https://maps.gstatic.com',
+        ],
+        'frame-src': ["'self'", 'https://checkout.razorpay.com', 'https://*.razorpay.com'],
+        'connect-src': [
+          "'self'",
+          'https://api.razorpay.com',
+          'https://checkout.razorpay.com',
+          'https://maps.googleapis.com',
+        ],
+        'img-src': ["'self'", 'data:', 'https:', 'blob:'],
+      },
+    },
+  })
+);
 
 // ---------- CORS ----------
 const allowedOrigins = (process.env.FRONTEND_URL || '')
@@ -185,6 +210,13 @@ app.use(
     credentials: true,
   })
 );
+
+// ---------- Razorpay webhook (raw body; MUST precede express.json()) ----------
+// Razorpay signs the raw request bytes. If express.json() parsed the body
+// first, signature verification would fail. This route is intentionally NOT
+// behind the /api/payment rate limiter (Razorpay retries webhooks).
+const { razorpayWebhook } = require('./controllers/razorpayController');
+app.post('/api/payment/razorpay/webhook', express.raw({ type: 'application/json' }), razorpayWebhook);
 
 // ---------- Body parsing ----------
 app.use(express.json({ limit: '1mb' }));
@@ -230,6 +262,25 @@ app.use('/api/hamper-types', require('./routes/hamperTypes'));
 app.use('/api', (req, res) => {
   res.status(404).json({ error: 'Not found.' });
 });
+
+// ---------- Serve the built frontend (single-service deploy) ----------
+// On Render the client is built into ../client/dist during the build step and
+// this backend serves it, so ONE web service hosts the API + the website.
+// Registered after all /api routes (and the /api 404 above) so API responses
+// are never swallowed by the SPA fallback. Skipped in local dev, where Vite
+// serves the frontend on :5173 instead.
+if (process.env.NODE_ENV === 'production') {
+  const clientDist = path.join(__dirname, '..', 'client', 'dist');
+  if (fs.existsSync(clientDist)) {
+    app.use(express.static(clientDist));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(clientDist, 'index.html'));
+    });
+    console.log('[client] Serving production website from', clientDist);
+  } else {
+    console.warn('[client] No production build found at', clientDist, '- website will not be served.');
+  }
+}
 
 // ---------- Error handler (never leak stack traces) ----------
  // eslint-disable-next-line no-unused-vars
