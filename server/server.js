@@ -211,12 +211,15 @@ app.use(
   })
 );
 
-// ---------- Razorpay webhook (raw body; MUST precede express.json()) ----------
-// Razorpay signs the raw request bytes. If express.json() parsed the body
-// first, signature verification would fail. This route is intentionally NOT
-// behind the /api/payment rate limiter (Razorpay retries webhooks).
-const { razorpayWebhook } = require('./controllers/razorpayController');
-app.post('/api/payment/razorpay/webhook', express.raw({ type: 'application/json' }), razorpayWebhook);
+// ---------- Razorpay webhook: DISABLED ----------
+// Razorpay is deferred (manual UPI is the active payment path), so the
+// webhook and its controller are unwired for now. To re-enable later:
+//   1. Restore controllers/razorpayController.js,
+//   2. re-add: const { razorpayWebhook } = require('./controllers/razorpayController');
+//      app.post('/api/payment/razorpay/webhook', express.raw({ type: 'application/json' }), razorpayWebhook);
+//      here (it MUST precede express.json() — Razorpay signs the raw bytes),
+//   3. re-add the /razorpay/* routes in routes/payment.js,
+//   4. set RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET / RAZORPAY_WEBHOOK_SECRET.
 
 // ---------- Body parsing ----------
 app.use(express.json({ limit: '1mb' }));

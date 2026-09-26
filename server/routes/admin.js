@@ -485,56 +485,10 @@ router.patch('/orders/:id/verify-payment', async (req, res, next) => {
   }
 });
 
-// ---------- Razorpay payment reconciliation ----------
-// POST /api/admin/payments/reconcile
-// Safety net for orders stuck in "Payment Verification Pending" (e.g. the
-// customer paid but the webhook never arrived). For each candidate order it
-// re-checks Razorpay server-side and marks captured payments paid.
-// Each order is wrapped in try/catch so one failure never aborts the sweep.
-router.post('/payments/reconcile', async (req, res, next) => {
-  try {
-    const { getRazorpay, markPaid } = require('../controllers/razorpayController');
-    const instance = getRazorpay();
-    if (!instance) {
-      return res.status(503).json({ error: 'Razorpay is not configured.' });
-    }
-
-    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
-    const candidates = await Order.find({
-      orderStatus: 'Payment Verification Pending',
-      paymentStatus: { $ne: 'Paid' },
-      razorpayOrderId: { $exists: true, $ne: null },
-      updatedAt: { $lt: tenMinutesAgo },
-    }).select('_id orderNumber');
-
-    let checked = 0;
-    let confirmed = 0;
-    for (const stub of candidates) {
-      checked += 1;
-      try {
-        const order = await Order.findById(stub._id);
-        if (!order || order.paymentStatus === 'Paid' || !order.razorpayOrderId) continue;
-        const resp = await instance.orders.fetchPayments(order.razorpayOrderId);
-        const items = (resp && resp.items) || [];
-        const expectedPaise = Math.round(Number(order.totalAmount) * 100);
-        const captured = items.find(
-          (p) => p.status === 'captured' && Number(p.amount) === expectedPaise
-        );
-        if (captured) {
-          await markPaid(order, captured.id);
-          confirmed += 1;
-          console.log('[reconcile] order confirmed:', order.orderNumber);
-        }
-      } catch (err) {
-        console.error('[reconcile] failed for order', stub.orderNumber, err.message);
-      }
-    }
-
-    res.json({ checked, confirmed });
-  } catch (err) {
-    next(err);
-  }
-});
+// ---------- Razorpay payment reconciliation: DISABLED ----------
+// Removed while Razorpay is deferred (it required the Razorpay controller).
+// To re-enable later, restore controllers/razorpayController.js and re-add the
+// POST /api/admin/payments/reconcile sweep from git history.
 
 // Update order fulfilment status
 router.patch('/orders/:id/status', async (req, res, next) => {
