@@ -1,0 +1,60 @@
+html,
+body,
+#root {
+  height: 100%;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background-color: #fbf7ef;
+  color: #3e2a20;
+  /* safety net against horizontal overflow; `clip` (not `hidden`)
+     so position: sticky elements keep working */
+  overflow-x: hidden;
+  overflow-x: clip;
+}
+
+a {
+  color: inherit;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+}
+
+/* warm, soft scrollbar to match the cozy theme */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: #f3ead9;
+}
+::-webkit-scrollbar-thumb {
+  background: #dcc7a4;
+  border-radius: 8px;
+  border: 2px solid #f3ead9;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #c96f4a;
+}
+
+/* gentle fade-up for page entrances */
+@keyframes warm-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.warm-rise {
+  animation: warm-rise 0.5s ease both;
+}
